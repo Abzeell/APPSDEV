@@ -28,12 +28,31 @@ class MainActivity : AppCompatActivity() {
     private val taskList = mutableListOf<Task>()
     private var nextLocalId = 1
 
+    // Store the logged in user's ID
+    private var currentUserId: String = ""
+
     private lateinit var addEditLauncher: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         supportActionBar?.hide()
         setContentView(R.layout.activity_main)
+
+        // --- SESSION MANAGEMENT ---
+        val sharedPref = getSharedPreferences("UserSession", MODE_PRIVATE)
+        currentUserId = sharedPref.getString("USER_ID", "") ?: ""
+        val name = sharedPref.getString("NAME", "User")
+
+        val tvWelcome = findViewById<TextView>(R.id.tvWelcome)
+        tvWelcome.text = "$name's Tasks"
+
+        val btnLogout = findViewById<View>(R.id.btnLogout)
+        btnLogout.setOnClickListener {
+            sharedPref.edit().clear().apply()
+            startActivity(Intent(this, LoginActivity::class.java))
+            finish()
+        }
+        // --------------------------
 
         progressBar = findViewById(R.id.progressBar)
         tvEmptyState = findViewById(R.id.tvEmptyState)
@@ -45,7 +64,6 @@ class MainActivity : AppCompatActivity() {
         setupSwipeToDelete()
         setupLauncher()
 
-        // Only fetch from API if no local tasks exist
         if (taskList.isEmpty()) {
             fetchTasksFromApi()
         } else {
@@ -66,8 +84,6 @@ class MainActivity : AppCompatActivity() {
                 val intent = Intent(this, AddEditTaskActivity::class.java)
                 intent.putExtra("mode", "edit")
                 intent.putExtra("position", position)
-                intent.putExtra("id", task.id)
-                intent.putExtra("apiId", task.apiId)
                 intent.putExtra("title", task.title)
                 intent.putExtra("description", task.description)
                 intent.putExtra("completed", task.isCompleted)
@@ -130,27 +146,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── REST API: READ ─────────────────────────────────────────────────────────
+    // ── mockAPI: READ ─────────────────────────────────────────────────────────
     private fun fetchTasksFromApi() {
         showLoading(true)
         lifecycleScope.launch {
             try {
-                val apiTasks = RetrofitClient.apiService.getTodos(10)
-                val newTasks = apiTasks.map { todo ->
+                // Fetch ONLY the tasks belonging to this user
+                val apiTasks = MockApiClient.apiService.getTasks(currentUserId)
+                val newTasks = apiTasks.map { apiTask ->
                     Task(
                         id = nextLocalId++,
-                        apiId = todo.id,
-                        title = todo.title.replaceFirstChar { it.uppercase() },
-                        description = "Fetched from JSONPlaceholder API",
-                        isCompleted = todo.completed
+                        apiId = apiTask.id,
+                        title = apiTask.title,
+                        description = apiTask.description,
+                        isCompleted = apiTask.completed
                     )
                 }
+                taskList.clear()
                 taskList.addAll(newTasks)
                 taskAdapter.notifyDataSetChanged()
                 saveLocalTasks()
-                Toast.makeText(this@MainActivity, "✅ Loaded ${newTasks.size} tasks from API", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "⚠️ Could not reach API: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "⚠️ Could not reach mockAPI", Toast.LENGTH_SHORT).show()
             } finally {
                 showLoading(false)
                 updateEmptyState()
@@ -158,14 +175,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── REST API: CREATE ───────────────────────────────────────────────────────
+    // ── mockAPI: CREATE ───────────────────────────────────────────────────────
     private fun createTask(title: String, description: String) {
         showLoading(true)
         lifecycleScope.launch {
             try {
-                val response = RetrofitClient.apiService.createTodo(
-                    TodoResponse(title = title, completed = false)
+                val newApiTask = ApiTask(
+                    userId = currentUserId,
+                    title = title,
+                    description = description,
+                    completed = false
                 )
+                val response = MockApiClient.apiService.createTask(newApiTask)
+
                 val task = Task(
                     id = nextLocalId++,
                     apiId = response.id,
@@ -177,9 +199,8 @@ class MainActivity : AppCompatActivity() {
                 taskAdapter.notifyItemInserted(0)
                 recyclerViewTasks.scrollToPosition(0)
                 saveLocalTasks()
-                Toast.makeText(this@MainActivity, "✅ Task created (API ID: ${response.id})", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                // Graceful fallback: save locally even if API fails
+                // Graceful fallback
                 val task = Task(id = nextLocalId++, title = title, description = description)
                 taskList.add(0, task)
                 taskAdapter.notifyItemInserted(0)
@@ -192,7 +213,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── REST API: UPDATE ───────────────────────────────────────────────────────
+    // ── mockAPI: UPDATE ───────────────────────────────────────────────────────
     private fun updateTask(position: Int, title: String, description: String, completed: Boolean) {
         val task = taskList[position]
         task.title = title
@@ -202,14 +223,18 @@ class MainActivity : AppCompatActivity() {
         showLoading(true)
         lifecycleScope.launch {
             try {
-                val apiId = if (task.apiId > 0) task.apiId else 1
-                RetrofitClient.apiService.updateTodo(
-                    apiId,
-                    TodoResponse(id = apiId, title = title, completed = completed)
-                )
-                Toast.makeText(this@MainActivity, "✅ Task updated", Toast.LENGTH_SHORT).show()
+                if (task.apiId.isNotEmpty()) {
+                    val updateApiTask = ApiTask(
+                        id = task.apiId,
+                        userId = currentUserId,
+                        title = title,
+                        description = description,
+                        completed = completed
+                    )
+                    MockApiClient.apiService.updateTask(task.apiId, updateApiTask)
+                }
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "⚠️ Updated locally", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "⚠️ Updated locally only", Toast.LENGTH_SHORT).show()
             } finally {
                 taskAdapter.notifyItemChanged(position)
                 saveLocalTasks()
@@ -218,7 +243,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── REST API: DELETE ───────────────────────────────────────────────────────
+    // ── mockAPI: DELETE ───────────────────────────────────────────────────────
     private fun deleteTask(task: Task, position: Int) {
         taskList.removeAt(position)
         taskAdapter.notifyItemRemoved(position)
@@ -227,27 +252,30 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val apiId = if (task.apiId > 0) task.apiId else 1
-                RetrofitClient.apiService.deleteTodo(apiId)
-                Toast.makeText(this@MainActivity, "🗑️ Task deleted", Toast.LENGTH_SHORT).show()
+                if (task.apiId.isNotEmpty()) {
+                    MockApiClient.apiService.deleteTask(task.apiId)
+                }
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "🗑️ Deleted locally", Toast.LENGTH_SHORT).show()
+                // Failed to delete from cloud, but already deleted locally
             }
         }
     }
 
-    // ── REST API: TOGGLE COMPLETE (partial update) ─────────────────────────────
+    // ── mockAPI: TOGGLE COMPLETE ──────────────────────────────────────────────
     private fun syncToggleWithApi(task: Task) {
         lifecycleScope.launch {
             try {
-                val apiId = if (task.apiId > 0) task.apiId else 1
-                RetrofitClient.apiService.updateTodo(
-                    apiId,
-                    TodoResponse(id = apiId, title = task.title, completed = task.isCompleted)
-                )
-            } catch (_: Exception) {
-                // Silent — local state is already updated
-            }
+                if (task.apiId.isNotEmpty()) {
+                    val updateApiTask = ApiTask(
+                        id = task.apiId,
+                        userId = currentUserId,
+                        title = task.title,
+                        description = task.description,
+                        completed = task.isCompleted
+                    )
+                    MockApiClient.apiService.updateTask(task.apiId, updateApiTask)
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -264,7 +292,8 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("todo_prefs", MODE_PRIVATE)
         val taskStrings = taskList.map { "${it.id}||${it.apiId}||${it.title}||${it.description}||${it.isCompleted}" }
         prefs.edit()
-            .putString("tasks_v2", taskStrings.joinToString("###"))
+            // We save local tasks grouped by currentUserId so user data doesn't mix!
+            .putString("tasks_$currentUserId", taskStrings.joinToString("###"))
             .putInt("next_id", nextLocalId)
             .apply()
     }
@@ -272,7 +301,7 @@ class MainActivity : AppCompatActivity() {
     private fun loadLocalTasks() {
         val prefs = getSharedPreferences("todo_prefs", MODE_PRIVATE)
         nextLocalId = prefs.getInt("next_id", 1)
-        val saved = prefs.getString("tasks_v2", null) ?: return
+        val saved = prefs.getString("tasks_$currentUserId", null) ?: return
         if (saved.isBlank()) return
         taskList.clear()
         saved.split("###").forEach { entry ->
@@ -280,7 +309,7 @@ class MainActivity : AppCompatActivity() {
             if (parts.size == 5) {
                 taskList.add(Task(
                     id = parts[0].toIntOrNull() ?: nextLocalId++,
-                    apiId = parts[1].toIntOrNull() ?: 0,
+                    apiId = parts[1],
                     title = parts[2],
                     description = parts[3],
                     isCompleted = parts[4].toBoolean()
